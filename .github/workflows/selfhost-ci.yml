@@ -1,0 +1,77 @@
+name: Selfhost CI
+
+# Fork-only workflow for the selfhost branch.
+# Upstream test.yml is pinned to `main` by nezhahq/nezha workflow policy tests
+# (and its stress job may only check out nezhahq repositories), so selfhost
+# gets its own copy of the ordinary and race/quality jobs instead of editing test.yml.
+on:
+  push:
+    branches:
+      - selfhost
+  pull_request:
+    branches:
+      - selfhost
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhost-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Selfhost tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ^1.26.1
+          cache: false
+      - name: Unit test
+        run: go test -mod=readonly -count=1 ./...
+
+  race-quality:
+    name: Selfhost race and quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ^1.26.1
+          cache: false
+      - name: Race and shuffle tests
+        run: go test -mod=readonly -race -shuffle=on -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(git ls-files -co --exclude-standard '*.go' -z | xargs -0 gofmt -l)"
+      - name: Build agent
+        run: go build ./cmd/agent
+
+  selfhost-required:
+    name: selfhost-required
+    if: ${{ always() }}
+    needs:
+      - tests
+      - race-quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all blocking jobs to pass
+        shell: bash
+        run: |
+          test "${{ needs.tests.result }}" = success
+          test "${{ needs.race-quality.result }}" = success
