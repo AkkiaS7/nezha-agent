@@ -1,6 +1,6 @@
 name: Selfhost CI
 
-# Fork-only workflow for the selfhost branch.
+# Fork-only workflow for the selfhost and integration branches.
 # Upstream test.yml is pinned to `main` by nezhahq/nezha workflow policy tests
 # (and its stress job may only check out nezhahq repositories), so selfhost
 # gets its own copy of the ordinary and race/quality jobs instead of editing test.yml.
@@ -8,9 +8,11 @@ on:
   push:
     branches:
       - selfhost
+      - integration
   pull_request:
     branches:
       - selfhost
+      - integration
 
 permissions:
   contents: read
