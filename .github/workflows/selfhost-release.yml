@@ -1,0 +1,143 @@
+# selfhost 自用发版：只由 v<上游基线>-selfhost.<N> tag 触发，产物与上游 agent.yml 相同
+# （nezha-agent_<os>_<arch>.zip + checksums.txt），供 agent 自更新使用。
+# 构建时通过 NZ_AGENT_UPDATE_REPO 把自更新仓库注入为本仓库（.goreleaser.yml 读取），
+# 并在打包前校验二进制里确实带上了它，避免发出会自更新回上游的版本。
+# 上游的 agent.yml 在本 fork 上已停用（它会被任何 v* tag 触发）。
+name: Selfhost release
+
+on:
+  push:
+    tags:
+      - "v*-selfhost.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhost-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-selfhost\.[1-9][0-9]*$ ]] \
+            || { echo "Tag must look like v2.4.0-selfhost.1" >&2; exit 1; }
+          git fetch --no-tags origin selfhost
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD \
+            || { echo "Tagged commit is not on selfhost" >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: true
+      matrix:
+        goos: [linux, windows, darwin, freebsd]
+        goarch: [amd64, arm64, 386]
+        include:
+          - goos: linux
+            goarch: 386
+          - goos: linux
+            goarch: s390x
+          - goos: linux
+            goarch: riscv64
+          - goos: linux
+            goarch: arm
+          - goos: linux
+            goarch: mips
+            gomips: softfloat
+          - goos: linux
+            goarch: mipsle
+            gomips: softfloat
+          - goos: linux
+            goarch: loong64
+          - goos: freebsd
+            goarch: arm
+        exclude:
+          - goos: darwin
+            goarch: 386
+
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    env:
+      NZ_AGENT_UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ^1.26.1
+
+      - name: Build
+        uses: goreleaser/goreleaser-action@v7
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: build --single-target --clean --skip=validate
+
+      - name: Verify update repository
+        run: |
+          bin=$(find dist -type f -name 'nezha-agent*' | head -n1)
+          test -n "$bin"
+          grep -aqF "$NZ_AGENT_UPDATE_REPO" "$bin" \
+            || { echo "Binary does not embed update repository $NZ_AGENT_UPDATE_REPO" >&2; exit 1; }
+
+      - name: Archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: zip -jr dist/nezha-agent_${GOOS}_${GOARCH}.zip dist/*/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: nezha-agent_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            ./dist/nezha-agent_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    name: Release
+    permissions:
+      contents: write # 创建 Release 并上传产物
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ./assets
+
+      - name: Checksum
+        run: sha256sum ./assets/*/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
+
+      # 必须是正式版：自更新会跳过 prerelease 和 draft。
+      - name: Release
+        run: |
+          gh release create "$RELEASE_TAG" checksums.txt assets/*/*.zip --verify-tag \
+            --title "$RELEASE_TAG" --generate-notes --latest --prerelease=false
