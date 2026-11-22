@@ -3,6 +3,8 @@
 # 构建时通过 NZ_AGENT_UPDATE_REPO 把自更新仓库注入为本仓库（.goreleaser.yml 读取），
 # 并在交叉编译前构建 linux/amd64 产物、运行 `nezha-agent update-repo` 校验实际生效的更新仓库，
 # 避免发出会自更新回上游的版本（不能用 grep：-X 指向不存在的符号时参数仍会写进 build info）。
+# release 先以 prerelease 发布：自更新跳过 prerelease，agent 不会更新到未验证的版本；
+# 在集成测试环境安装并冒烟通过后，再用同一份产物晋级为正式版，线上 agent 随之自更新，不重新构建。
 # 上游的 agent.yml 在本 fork 上已停用（它会被任何 v* tag 触发）。
 name: Selfhost release
 
@@ -168,8 +170,8 @@ jobs:
       - name: Checksum
         run: sha256sum ./assets/*/*.zip | awk -F" |/" '{print $1, $NF}' > checksums.txt
 
-      # 必须是正式版：自更新会跳过 prerelease 和 draft。
+      # 先发 prerelease（自更新会跳过 prerelease 和 draft），验证通过后晋级为正式版并设为 latest。
       - name: Release
         run: |
           gh release create "$RELEASE_TAG" checksums.txt assets/*/*.zip --verify-tag \
-            --title "$RELEASE_TAG" --generate-notes --latest --prerelease=false
+            --title "$RELEASE_TAG" --generate-notes --prerelease --latest=false
